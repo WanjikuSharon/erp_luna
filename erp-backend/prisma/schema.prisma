@@ -13,3 +13,300 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+// ----------------
+// 1. CORE DATA
+// ----------------
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  name      String
+  password  String // Will be hashed
+  role      UserRole  @default(SALES)
+  
+  // Relations
+  invoices       Invoice[]     @relation("SalesPerson")
+  adjustments    StockAdjustment[]
+  commissions    Commission[]
+  activityLogs   AuditLog[]
+}
+
+enum UserRole {
+  ADMIN
+  OPERATIONS
+  PRODUCTION
+  SALES
+}
+
+model Vendor {
+  id          String    @id @default(cuid())
+  name        String
+  contactInfo String?
+  
+  // Relations
+  purchaseOrders PurchaseOrder[]
+}
+
+model Customer {
+  id        String    @id @default(cuid())
+  name      String
+  type      CustomerType @default(AGENT)
+  latitude  Float?
+  longitude Float?
+  
+  // Relations
+  invoices  Invoice[]
+}
+
+enum CustomerType {
+  AGENT
+  CORPORATE // e.g., Supermarket
+}
+
+// ----------------
+// 2. MASTER DATA (The "Catalog")
+// ----------------
+
+model RawMaterial {
+  id    String @id @default(cuid())
+  name  String @unique
+  unit  String // "kg", "litre", "piece"
+  
+  // Relations
+  stockItems  RawMaterialStock[]
+  formulaItems FormulaItem[]
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  sku         String   @unique
+  name        String
+  salePrice   Decimal
+  
+  // Relations
+  stockItems    ProductStock[]
+  formula       ProductFormula?
+  invoiceItems  InvoiceItem[]
+}
+
+// The "Recipe" or Bill of Materials
+model ProductFormula {
+  id        String   @id @default(cuid())
+  productId String   @unique
+  product   Product  @relation(fields: [productId], references: [id])
+  
+  // Relations
+  items     FormulaItem[]
+}
+
+// An item *in* a recipe
+model FormulaItem {
+  id            String   @id @default(cuid())
+  formulaId     String
+  rawMaterialId String
+  quantityNeeded Decimal // e.g., 0.5 of the 'unit'
+  
+  // Relations
+  formula       ProductFormula @relation(fields: [formulaId], references: [id])
+  rawMaterial   RawMaterial    @relation(fields: [rawMaterialId], references: [id])
+}
+
+
+// ----------------
+// 3. LIVE INVENTORY (The "State")
+// ----------------
+
+// This is your *actual* raw material inventory
+model RawMaterialStock {
+  id            String    @id @default(cuid())
+  rawMaterialId String
+  quantity      Decimal   // Current amount in stock
+  batchNumber   String?
+  expiryDate    DateTime?
+  qualityChecked Boolean  @default(false)
+  
+  // Relations
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id])
+  
+  @@index([rawMaterialId])
+}
+
+// This is your *actual* finished product inventory
+model ProductStock {
+  id        String   @id @default(cuid())
+  productId String
+  quantity  Int      // Current number of bottles in stock
+  batchNumber String?
+  
+  // Relations
+  product   Product @relation(fields: [productId], references: [id])
+  
+  @@index([productId])
+}
+
+
+// ----------------
+// 4. TRANSACTION LOGS (The "Events")
+// ----------------
+
+// 1. Getting raw materials
+model PurchaseOrder {
+  id       String    @id @default(cuid())
+  vendorId String
+  status   POStatus  @default(PENDING)
+  createdAt DateTime @default(now())
+  
+  // Relations
+  vendor   Vendor   @relation(fields: [vendorId], references: [id])
+  items    PurchaseOrderItem[]
+  receipts StockReceipt[]
+}
+
+enum POStatus {
+  PENDING
+  PARTIAL
+  RECEIVED
+}
+
+model PurchaseOrderItem {
+  id              String   @id @default(cuid())
+  purchaseOrderId String
+  rawMaterialId   String
+  quantityOrdered Decimal
+  
+  // Relations
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  // We don't link to RawMaterial here, just use the ID
+}
+
+// The *act* of receiving stock. This CREATES RawMaterialStock records.
+model StockReceipt {
+  id              String    @id @default(cuid())
+  purchaseOrderId String?   // Can be null for manual additions
+  receivedById    String    // User ID
+  notes           String?
+  createdAt       DateTime  @default(now())
+  
+  // Relations
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  // We'd link the items received here
+}
+
+// 2. Making products
+model ProductionRun {
+  id                String    @id @default(cuid())
+  productId         String
+  quantityToProduce Int
+  quantityProduced  Int?
+  status            RunStatus @default(PENDING)
+  notes             String?   // e.g., "bottles used", "stickers used"
+  createdAt         DateTime  @default(now())
+  completedAt       DateTime?
+  
+  // Relations
+  // We'd link the actual stock movements in a log
+}
+
+enum RunStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// 3. Selling products
+model Invoice {
+  id              String        @id @default(cuid())
+  customerId      String?       // For corporate
+  salesPersonId   String        // For agent
+  status          InvoiceStatus @default(PENDING)
+  paymentMethod   PaymentMethod @default(CASH)
+  totalAmount     Decimal
+  commissionAmount Decimal
+  createdAt       DateTime      @default(now())
+  
+  // Relations
+  customer      Customer?     @relation(fields: [customerId], references: [id])
+  salesPerson   User          @relation(fields: [salesPersonId], references: [id], name: "SalesPerson")
+  items         InvoiceItem[]
+  payments      Payment[]
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  CANCELLED
+  RETURNED
+}
+
+enum PaymentMethod {
+  CASH
+  PESAPAL
+  PAYSTACK
+}
+
+model InvoiceItem {
+  id        String   @id @default(cuid())
+  invoiceId String
+  productId String
+  quantity  Int
+  pricePerUnit Decimal // Price at time of sale
+  
+  // Relations
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+  product   Product @relation(fields: [productId], references: [id])
+}
+
+// For Pesapal/Paystack integrations
+model Payment {
+  id            String   @id @default(cuid())
+  invoiceId     String
+  amount        Decimal
+  transactionId String   @unique // From payment provider
+  status        String   // "SUCCESS", "FAILED"
+  createdAt     DateTime @default(now())
+  
+  // Relations
+  invoice       Invoice  @relation(fields: [invoiceId], references: [id])
+}
+
+// For damages, returns, manual counts
+model StockAdjustment {
+  id            String    @id @default(cuid())
+  productId     String?
+  rawMaterialId String?
+  quantity      Decimal   // Can be positive (return) or negative (damage)
+  reason        String
+  adjustedById  String    // User ID
+  createdAt     DateTime  @default(now())
+  
+  // Relations
+  adjustedBy    User      @relation(fields: [adjustedById], references: [id])
+}
+
+// For commission tracking
+model Commission {
+  id            String   @id @default(cuid())
+  salesPersonId String
+  invoiceId     String
+  amount        Decimal
+  status        String   // "EARNED", "PAID"
+  createdAt     DateTime @default(now())
+  
+  // Relations
+  salesPerson   User     @relation(fields: [salesPersonId], references: [id])
+}
+
+// 4. Admin audit
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String   // e.g., "CREATE_SALE", "UPDATE_STOCK"
+  targetId  String?  // ID of the item that was changed
+  details   Json?
+  createdAt DateTime @default(now())
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id])
+}
